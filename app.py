@@ -73,21 +73,59 @@ def add_white_noise_to(signal, snr_db, seed):
     return signal + rng.normal(0.0, np.sqrt(p_noise), size=signal.shape)
 
 
-def cross_corr(rx, ref):
-    """Correlación cruzada normalizada por la energía del patrón de referencia.
-    Devuelve r[k] tal que r[k] ≈ 1 cuando rx contiene una copia exacta de ref
-    desfasada en k (en muestras).
+def _overlap_count(N, M):
+    """Número de muestras solapadas en cada lag de np.correlate(a, b, 'full')
+    con len(a)=N, len(b)=M. En los extremos del eje de lag el solapamiento
+    decae linealmente — esa es la fuente del envoltorio triangular en los
+    bordes del resultado.
     """
-    full = np.correlate(rx, ref, mode="full")
-    energy_ref = float(np.sum(ref ** 2))
-    return full / (energy_ref + 1e-12)
+    L = N + M - 1
+    k = np.arange(L)
+    return np.minimum.reduce([
+        (k + 1).astype(float),
+        np.full(L, M, dtype=float),
+        np.full(L, N, dtype=float),
+        (L - k).astype(float),
+    ])
 
 
-def autocorr_norm(x):
-    """Autocorrelación normalizada para que el pico en lag 0 valga 1."""
-    full = np.correlate(x, x, mode="full")
-    peak = float(np.max(np.abs(full)))
-    return full / (peak + 1e-12)
+def cross_corr_normalized(rx, ref, kind="stationary"):
+    """Correlación cruzada con compensación del recorte de integración.
+
+    El integral teórico se evalúa sobre dominio infinito; en una observación
+    finita el solape decae hacia los bordes y aparece la típica caída
+    triangular. Se compensa eligiendo la normalización adecuada al tipo de
+    señal:
+
+      kind="stationary" → estimador insesgado (divide por el solape de cada
+        lag). Para señales periódicas / estacionarias: senoidales, ruido,
+        sumas, secuencias pseudoaleatorias.
+      kind="finite" → estimador sesgado (divide por la energía de la
+        referencia). Para señales de energía finita y soporte localizado
+        (pulsos, ecos), donde el triángulo del solape es la respuesta
+        correcta.
+    """
+    full = np.correlate(rx, ref, mode="full").astype(float)
+    if kind == "stationary":
+        n_ov = np.maximum(_overlap_count(len(rx), len(ref)), 1.0)
+        unbiased = full / n_ov
+        norm = np.sqrt(np.mean(rx ** 2) * np.mean(ref ** 2)) + 1e-12
+        return unbiased / norm
+    norm = float(np.sum(ref ** 2)) + 1e-12
+    return full / norm
+
+
+def autocorr_normalized(x, kind="stationary"):
+    """Autocorrelación con compensación de bordes (ver cross_corr_normalized).
+    Pico en lag 0 = 1 en ambas variantes.
+    """
+    full = np.correlate(x, x, mode="full").astype(float)
+    if kind == "stationary":
+        n_ov = np.maximum(_overlap_count(len(x), len(x)), 1.0)
+        unbiased = full / n_ov
+        return unbiased / (np.mean(x ** 2) + 1e-12)
+    peak = float(np.max(np.abs(full))) + 1e-12
+    return full / peak
 
 
 def info_box(html, font_color=None):
@@ -164,14 +202,23 @@ with tab1:
     ]
     caso = st.selectbox("Caso", casos_xc, key="caso_xcorr")
 
-    # Eje de tiempo común
-    fs_int = 2000           # Hz internos para la simulación
-    T = 1.0                 # duración (s)
-    t = np.arange(0, T, 1.0 / fs_int)
+    # Eje de tiempo: se calcula sobre una ventana extendida (T_calc) y se
+    # muestra solo la ventana visible (T_disp). El "ciclo extra de integración"
+    # evita que la correlación caiga artificialmente en los bordes del eje
+    # τ por falta de muestras solapadas.
+    fs_int = 2000                         # Hz internos para la simulación
+    T_disp = 1.0                          # ventana visible (s)
+    T_calc = 3.0                          # ventana de cómputo (s) — 3× la visible
+    t = np.arange(0, T_calc, 1.0 / fs_int)
     N = len(t)
+    N_disp = int(T_disp * fs_int)         # muestras visibles
+    t_disp = t[:N_disp]                   # eje visible para señales
 
-    retardo_real_ms = None  # τ verdadero, si aplica
+    retardo_real_ms = None                # τ verdadero, si aplica
     es_caso_ruido = (caso == "Señal vs ruido (caso negativo)")
+    # Tipo de señal para elegir el estimador (insesgado para estacionarias,
+    # sesgado para señales de energía finita y soporte localizado).
+    kind = "finite" if caso == "Pulso retardado (radar / ranging)" else "stationary"
 
     if caso == "Pulso retardado (radar / ranging)":
         c1, c2 = st.columns(2)
@@ -258,14 +305,27 @@ with tab1:
     if add_noise and not es_caso_ruido:
         b = add_white_noise_to(b, snr_db, seed=13)
 
-    # Correlación cruzada (referencia = a, recibida = b → buscamos B = A(t-τ))
-    full = np.correlate(b, a, mode="full")
-    norm = float(np.sum(a ** 2))
-    r_xc = full / (norm + 1e-12)
-    lags = np.arange(-(N - 1), N)
-    tau_ms = lags * 1000.0 / fs_int
+    # Correlación cruzada con compensación del recorte de integración.
+    # Se computa sobre la ventana extendida (3× la visible) y se muestra
+    # solo el rango |τ| ≤ T_disp, donde el solape sigue siendo amplio.
+    r_full = cross_corr_normalized(b, a, kind=kind)
+    lags_full = np.arange(-(N - 1), N)
+    tau_full_ms = lags_full * 1000.0 / fs_int
+    mask = np.abs(lags_full) <= N_disp
+    tau_ms = tau_full_ms[mask]
+    r_xc = r_full[mask]
 
-    i_max = int(np.argmax(r_xc))
+    # Argmax "inteligente" para señales periódicas: la correlación insesgada
+    # equilibra la altura de los picos secundarios, por lo que un argmax global
+    # puede caer en cualquiera de ellos. Si conocemos τ esperado, buscamos el
+    # pico principal en una ventana acotada alrededor de ese valor.
+    if kind == "stationary" and retardo_real_ms is not None:
+        i_target = int(np.argmin(np.abs(tau_ms - retardo_real_ms)))
+        half_w = max(20, len(tau_ms) // 30)
+        lo, hi = max(0, i_target - half_w), min(len(tau_ms), i_target + half_w + 1)
+        i_max = lo + int(np.argmax(r_xc[lo:hi]))
+    else:
+        i_max = int(np.argmax(r_xc))
     tau_pico_ms = float(tau_ms[i_max])
     nivel_pico = float(r_xc[i_max])
 
@@ -280,11 +340,13 @@ with tab1:
         vertical_spacing=0.11,
     )
     fig.add_trace(
-        go.Scatter(x=t * 1000, y=a, line=dict(color=C["signal"], width=2), showlegend=False),
+        go.Scatter(x=t_disp * 1000, y=a[:N_disp],
+                   line=dict(color=C["signal"], width=2), showlegend=False),
         row=1, col=1,
     )
     fig.add_trace(
-        go.Scatter(x=t * 1000, y=b, line=dict(color=C["received"], width=1.5), showlegend=False),
+        go.Scatter(x=t_disp * 1000, y=b[:N_disp],
+                   line=dict(color=C["received"], width=1.5), showlegend=False),
         row=2, col=1,
     )
     fig.add_trace(
@@ -344,12 +406,17 @@ with tab2:
     ]
     caso2 = st.selectbox("Tipo de señal", casos_ac, key="caso_acorr")
 
+    # Eje extendido para compensar el recorte de integración (ver Tab 1).
     fs_int2 = 2000
-    T2 = 1.0
-    t2 = np.arange(0, T2, 1.0 / fs_int2)
+    T_disp2 = 1.0                          # ventana visible (s)
+    T_calc2 = 3.0                          # ventana de cómputo (s) — 3× la visible
+    t2 = np.arange(0, T_calc2, 1.0 / fs_int2)
     N2 = len(t2)
+    N_disp2 = int(T_disp2 * fs_int2)
+    t2_disp = t2[:N_disp2]
 
     es_caso_ruido2 = (caso2 == "Ruido blanco")
+    kind2 = "finite" if caso2 == "Pulso rectangular" else "stationary"
 
     if caso2 == "Senoidal pura":
         f0 = st.slider("Frecuencia (Hz)", 1, 30, 5, 1, key="f_seno_ac")
@@ -374,7 +441,8 @@ with tab2:
         ancho_ms = st.slider("Ancho del pulso (ms)", 10, 500, 100, 10, key="pulso_ac")
         ancho_n = max(1, int(ancho_ms / 1000 * fs_int2))
         x = np.zeros(N2)
-        start = (N2 - ancho_n) // 2
+        # Centrar el pulso en la ventana visible (no en la extendida).
+        start = max(0, (N_disp2 - ancho_n) // 2)
         x[start:start + ancho_n] = 1.0
         explicacion2 = (
             "La autocorrelación de un pulso rectangular de ancho T es un "
@@ -416,9 +484,13 @@ with tab2:
     if add_noise and not es_caso_ruido2:
         x_proc = add_white_noise_to(x, snr_db, seed=99)
 
-    rxx = autocorr_norm(x_proc)
-    lags2 = np.arange(-(N2 - 1), N2)
-    tau_ms2 = lags2 * 1000.0 / fs_int2
+    # Autocorrelación con compensación de bordes y recorte al rango visible.
+    rxx_full = autocorr_normalized(x_proc, kind=kind2)
+    lags2_full = np.arange(-(N2 - 1), N2)
+    tau_ms2_full = lags2_full * 1000.0 / fs_int2
+    mask2 = np.abs(lags2_full) <= N_disp2
+    tau_ms2 = tau_ms2_full[mask2]
+    rxx = rxx_full[mask2]
 
     fig2 = make_subplots(
         rows=2, cols=1,
@@ -430,7 +502,8 @@ with tab2:
         row_heights=[0.4, 0.6],
     )
     fig2.add_trace(
-        go.Scatter(x=t2 * 1000, y=x_proc, line=dict(color=C["signal"], width=1.2), showlegend=False),
+        go.Scatter(x=t2_disp * 1000, y=x_proc[:N_disp2],
+                   line=dict(color=C["signal"], width=1.2), showlegend=False),
         row=1, col=1,
     )
     fig2.add_trace(
@@ -521,11 +594,18 @@ with tab3:
         trama_rx = trama.copy()
 
     # ─── Correlación cruzada ───────────────────────────────────────────────────
+    # El patrón se mantiene limpio (referencia) y normalizamos por su energía,
+    # de modo que un match perfecto dé R = 1. Se recorta el eje de lag al
+    # rango válido: aquellas posiciones donde el patrón cabe ENTERO dentro de
+    # la trama (lag ∈ [0, N_trama − N_patrón]). Más allá de ese rango el
+    # solape es parcial y produciría la típica caída triangular de borde —
+    # un artefacto, no información útil para el sincronismo.
     full = np.correlate(trama_rx, sync_sig, mode="full")
     norm = float(np.sum(sync_sig ** 2))         # = len(sync_sig) para NRZ ±1
     corr_full = full / (norm + 1e-12)
     lag0 = len(sync_sig) - 1
-    corr = corr_full[lag0:]                     # solo lags ≥ 0
+    n_valid = len(trama_rx) - len(sync_sig) + 1
+    corr = corr_full[lag0:lag0 + n_valid]       # rango válido (sin tail tapered)
     t_corr = np.arange(len(corr)) / fs_sim
 
     i_max = int(np.argmax(corr))
@@ -646,7 +726,7 @@ with tab3:
 
     # ─── Autocorrelación del propio patrón (calidad del código) ────────────────
     st.markdown("##### Autocorrelación del patrón elegido (calidad del código)")
-    rcc = autocorr_norm(sync_sig)
+    rcc = autocorr_normalized(sync_sig, kind="finite")
     lags_cc = np.arange(-(len(sync_sig) - 1), len(sync_sig))
     tau_cc = lags_cc / fs_sim * t_scale
 
