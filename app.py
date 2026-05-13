@@ -545,7 +545,12 @@ with tab_simple:
         "Señal A consigo misma."
     )
 
-    TIPOS = ["Senoidal", "Tren de pulsos cuadrados", "Tren de pulsos triangulares"]
+    TIPOS = [
+        "Senoidal",
+        "Tren de pulsos cuadrados",
+        "Tren de pulsos triangulares",
+        "Diente de sierra (medio ciclo)",
+    ]
 
     auto_on = st.toggle(
         "🔁 Autocorrelación (correlaciona la Señal A consigo misma; deshabilita Señal B)",
@@ -578,17 +583,21 @@ with tab_simple:
     t_vis = t[:N_disp]                         # eje visible
 
     def generar_senal(tipo, freq, amp, t):
-        """Genera una de las tres señales pedidas con frecuencia y amplitud dadas."""
+        """Genera una de las señales pedidas con frecuencia y amplitud dadas."""
         if tipo == "Senoidal":
             return amp * np.sin(2 * np.pi * freq * t)
         if tipo == "Tren de pulsos cuadrados":
             return amp * np.sign(np.sin(2 * np.pi * freq * t))
-        # Tren de pulsos triangulares: onda triangular simétrica entre -amp y +amp.
-        # fase ∈ [0,1) recorre un período; el valor sube de -1 a 1 y vuelve a -1.
-        # Se desplaza un cuarto de período para que cruce por cero en t=0 (igual
-        # que sin(2π·f·t)).
-        fase = (freq * t + 0.25) % 1.0
-        return amp * (1.0 - 4.0 * np.abs(fase - 0.5))
+        if tipo == "Tren de pulsos triangulares":
+            # Onda triangular simétrica entre -amp y +amp. fase ∈ [0,1) recorre
+            # un período; el valor sube de -1 a 1 y vuelve a -1. Se desplaza un
+            # cuarto de período para que cruce por cero en t=0 (igual que sin).
+            fase = (freq * t + 0.25) % 1.0
+            return amp * (1.0 - 4.0 * np.abs(fase - 0.5))
+        # Diente de sierra de medio ciclo: rampa lineal de 0 a amp durante la
+        # primera mitad del período y cero durante la segunda mitad.
+        fase = (freq * t) % 1.0
+        return amp * np.where(fase < 0.5, 2.0 * fase, 0.0)
 
     señal_a = generar_senal(tipo_a, f_a, amp_a, t)
     if auto_on:
@@ -622,10 +631,10 @@ with tab_simple:
     correl = correl / norma
 
     # 4) Eje de lags en milisegundos y recorte a la zona donde el solape
-    #    sigue siendo amplio (|τ| ≤ T_disp).
+    #    sigue siendo amplio. Solo se muestra el semieje positivo (0 ≤ τ ≤ T_disp).
     lags = np.arange(-(N - 1), N)
     tau_ms = lags * 1000.0 / fs
-    mascara = np.abs(lags) <= N_disp
+    mascara = (lags >= 0) & (lags <= N_disp)
     tau_vis_ms = tau_ms[mascara]
     correl_vis = correl[mascara]
 
