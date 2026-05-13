@@ -175,351 +175,523 @@ st.markdown(
     f"color:{C['signal']}; margin-bottom:2px'>"
     f"Simulador de Correlación</h1>"
     f"<p style='text-align:center; color:{C['zone_label']}; font-family:monospace; font-size:13px; margin-top:0'>"
-    f"Correlación cruzada · Autocorrelación · Sincronismo de trama</p>",
+    f"Correlación de señales · Sincronismo de trama</p>",
     unsafe_allow_html=True,
 )
 
-tab1, tab2, tab3 = st.tabs([
-    "📈 Correlación cruzada",
-    "🔄 Autocorrelación",
-    "🎯 Sincronismo de trama",
-])
+# ─── Habilitación de tabs ─────────────────────────────────────────────────────
+# Por defecto solo se muestran "Correlación simple" y "Sincronismo de trama".
+# Para volver a habilitar los tabs "Correlación cruzada" y "Autocorrelación",
+# cambiar la siguiente línea a True:
+MOSTRAR_TABS_AVANZADOS = False
+
+if MOSTRAR_TABS_AVANZADOS:
+    tab1, tab2, tab_simple, tab3 = st.tabs([
+        "📈 Correlación cruzada",
+        "🔄 Autocorrelación",
+        "🧪 Correlación simple",
+        "🎯 Sincronismo de trama",
+    ])
+else:
+    tab_simple, tab3 = st.tabs([
+        "🧪 Correlación simple",
+        "🎯 Sincronismo de trama",
+    ])
 
 # ─── Tab 1: Correlación cruzada ───────────────────────────────────────────────
-with tab1:
-    st.markdown("#### Correlación cruzada de dos señales")
+if MOSTRAR_TABS_AVANZADOS:
+    with tab1:
+        st.markdown("#### Correlación cruzada de dos señales")
+        st.caption(
+            "Elegí un caso didáctico. La _señal A_ es la referencia y la _señal B_ es la "
+            "recibida (sobre la que se aplica el ruido si está activado)."
+        )
+
+        casos_xc = [
+            "Pulso retardado (radar / ranging)",
+            "Senoidales · misma frecuencia (con desfase)",
+            "Senoidal vs cuadrada (misma frecuencia)",
+            "Frecuencias distintas (caso ortogonal)",
+            "Señal vs ruido (caso negativo)",
+        ]
+        caso = st.selectbox("Caso", casos_xc, key="caso_xcorr")
+
+        # Eje de tiempo: se calcula sobre una ventana extendida (T_calc) y se
+        # muestra solo la ventana visible (T_disp). El "ciclo extra de integración"
+        # evita que la correlación caiga artificialmente en los bordes del eje
+        # τ por falta de muestras solapadas.
+        fs_int = 2000                         # Hz internos para la simulación
+        T_disp = 1.0                          # ventana visible (s)
+        T_calc = 3.0                          # ventana de cómputo (s) — 3× la visible
+        t = np.arange(0, T_calc, 1.0 / fs_int)
+        N = len(t)
+        N_disp = int(T_disp * fs_int)         # muestras visibles
+        t_disp = t[:N_disp]                   # eje visible para señales
+
+        retardo_real_ms = None                # τ verdadero, si aplica
+        es_caso_ruido = (caso == "Señal vs ruido (caso negativo)")
+        # Tipo de señal para elegir el estimador (insesgado para estacionarias,
+        # sesgado para señales de energía finita y soporte localizado).
+        kind = "finite" if caso == "Pulso retardado (radar / ranging)" else "stationary"
+
+        if caso == "Pulso retardado (radar / ranging)":
+            c1, c2 = st.columns(2)
+            delay_ms = c1.slider("Retardo del eco τ (ms)", 0, 800, 250, 10, key="delay_radar")
+            ancho_ms = c2.slider("Ancho del pulso (ms)", 5, 200, 40, 5, key="ancho_radar")
+            ancho_n = max(1, int(ancho_ms / 1000 * fs_int))
+            delay_n = int(delay_ms / 1000 * fs_int)
+
+            a = np.zeros(N)
+            a[0:ancho_n] = 1.0
+            b = np.zeros(N)
+            end_b = min(N, delay_n + ancho_n)
+            if delay_n < N:
+                b[delay_n:end_b] = 1.0
+
+            nombre_a, nombre_b = "Pulso emitido", "Eco recibido"
+            retardo_real_ms = float(delay_ms)
+            explicacion = (
+                "La <b>correlación cruzada</b> entre el pulso emitido y el eco recibido "
+                "presenta un pico en τ igual al retardo del eco. "
+                "Es la base del radar y del LIDAR: medir el tiempo del pico permite "
+                "calcular la distancia al blanco."
+            )
+
+        elif caso == "Senoidales · misma frecuencia (con desfase)":
+            c1, c2 = st.columns(2)
+            f0 = c1.slider("Frecuencia f₀ (Hz)", 1, 30, 5, 1, key="f_seno_xc")
+            fase = c2.slider("Desfase φ (°)", -180, 180, 60, 5, key="fase_seno_xc")
+            a = np.sin(2 * np.pi * f0 * t)
+            b = np.sin(2 * np.pi * f0 * t + np.deg2rad(fase))
+            nombre_a = "sin(2π·f₀·t)"
+            nombre_b = f"sin(2π·f₀·t + {fase}°)"
+            # τ que maximiza la correlación: B(t) = A(t + τ_real) ⇒ τ_real = -φ/(2π·f₀)
+            retardo_real_ms = -np.deg2rad(fase) / (2 * np.pi * f0) * 1000.0
+            explicacion = (
+                "La correlación de dos senoidales de igual frecuencia es <b>cosenoidal</b> en τ "
+                "y alcanza el máximo en el desfase temporal entre ambas. "
+                "Permite estimar el desfase de un canal coherente."
+            )
+
+        elif caso == "Senoidal vs cuadrada (misma frecuencia)":
+            f0 = st.slider("Frecuencia f₀ (Hz)", 1, 30, 5, 1, key="f_sq_xc")
+            a = np.sin(2 * np.pi * f0 * t)
+            b = np.sign(np.sin(2 * np.pi * f0 * t))
+            nombre_a = "sin(2π·f₀·t)"
+            nombre_b = "sgn(sin(2π·f₀·t))"
+            retardo_real_ms = 0.0
+            explicacion = (
+                "Aunque las formas son distintas, ambas comparten la <b>fundamental</b>. "
+                "La correlación es alta y máxima en τ=0 — la cuadrada se descompone en "
+                "armónicos impares y solo la fundamental aporta al producto interno con la senoidal."
+            )
+
+        elif caso == "Frecuencias distintas (caso ortogonal)":
+            c1, c2 = st.columns(2)
+            f1 = c1.slider("Frecuencia A (Hz)", 1, 30, 5, 1, key="f1_orto_xc")
+            f2 = c2.slider("Frecuencia B (Hz)", 1, 30, 8, 1, key="f2_orto_xc")
+            a = np.sin(2 * np.pi * f1 * t)
+            b = np.sin(2 * np.pi * f2 * t)
+            nombre_a = f"sin(2π·{f1}·t)"
+            nombre_b = f"sin(2π·{f2}·t)"
+            explicacion = (
+                "Sobre un intervalo entero de períodos comunes, las senoidales de "
+                "<b>frecuencias distintas</b> son ortogonales: la correlación oscila alrededor de "
+                "cero y no presenta un pico claro. Es el principio de la modulación FDM/OFDM."
+            )
+
+        else:  # Señal vs ruido
+            f0 = st.slider("Frecuencia f₀ (Hz)", 1, 30, 5, 1, key="f_ruido_xc")
+            a = np.sin(2 * np.pi * f0 * t)
+            rng = np.random.default_rng(7)
+            b = rng.normal(0, 1, size=N)
+            nombre_a = "sin(2π·f₀·t)"
+            nombre_b = "ruido blanco"
+            explicacion = (
+                "El ruido blanco es <b>estadísticamente independiente</b> de cualquier señal "
+                "determinista. La correlación cruzada tiende a cero (con fluctuaciones por la "
+                "longitud finita de la observación). Por eso la correlación se usa como filtro "
+                "adaptado contra el ruido."
+            )
+
+        # Ruido en la señal recibida (B). En "señal vs ruido" no se vuelve a sumar.
+        b_clean = b.copy()
+        if add_noise and not es_caso_ruido:
+            b = add_white_noise_to(b, snr_db, seed=13)
+
+        # Correlación cruzada con compensación del recorte de integración.
+        # Se computa sobre la ventana extendida (3× la visible) y se muestra
+        # solo el rango |τ| ≤ T_disp, donde el solape sigue siendo amplio.
+        r_full = cross_corr_normalized(b, a, kind=kind)
+        lags_full = np.arange(-(N - 1), N)
+        tau_full_ms = lags_full * 1000.0 / fs_int
+        mask = np.abs(lags_full) <= N_disp
+        tau_ms = tau_full_ms[mask]
+        r_xc = r_full[mask]
+
+        # Argmax "inteligente" para señales periódicas: la correlación insesgada
+        # equilibra la altura de los picos secundarios, por lo que un argmax global
+        # puede caer en cualquiera de ellos. Si conocemos τ esperado, buscamos el
+        # pico principal en una ventana acotada alrededor de ese valor.
+        if kind == "stationary" and retardo_real_ms is not None:
+            i_target = int(np.argmin(np.abs(tau_ms - retardo_real_ms)))
+            half_w = max(20, len(tau_ms) // 30)
+            lo, hi = max(0, i_target - half_w), min(len(tau_ms), i_target + half_w + 1)
+            i_max = lo + int(np.argmax(r_xc[lo:hi]))
+        else:
+            i_max = int(np.argmax(r_xc))
+        tau_pico_ms = float(tau_ms[i_max])
+        nivel_pico = float(r_xc[i_max])
+
+        # ─── Gráfico ───
+        fig = make_subplots(
+            rows=3, cols=1,
+            subplot_titles=(
+                f"Señal A (referencia): {nombre_a}",
+                f"Señal B (recibida): {nombre_b}" + ("  ·  con ruido" if (add_noise and not es_caso_ruido) else "  ·  sin ruido"),
+                "Correlación cruzada R<sub>BA</sub>(τ)",
+            ),
+            vertical_spacing=0.11,
+        )
+        fig.add_trace(
+            go.Scatter(x=t_disp * 1000, y=a[:N_disp],
+                       line=dict(color=C["signal"], width=2), showlegend=False),
+            row=1, col=1,
+        )
+        fig.add_trace(
+            go.Scatter(x=t_disp * 1000, y=b[:N_disp],
+                       line=dict(color=C["received"], width=1.5), showlegend=False),
+            row=2, col=1,
+        )
+        fig.add_trace(
+            go.Scatter(x=tau_ms, y=r_xc, line=dict(color=C["filtered"], width=2), showlegend=False),
+            row=3, col=1,
+        )
+        fig.add_vline(
+            x=tau_pico_ms, line_dash="dash", line_color=C["peak"], line_width=1.5,
+            annotation_text=f"τ* = {tau_pico_ms:.1f} ms<br>R = {nivel_pico:.2f}",
+            annotation_font_color=C["peak"], annotation_position="top right",
+            row=3, col=1,
+        )
+        if retardo_real_ms is not None:
+            fig.add_vline(
+                x=retardo_real_ms, line_dash="dot", line_color=C["real"], line_width=1.2,
+                annotation_text=f"τ real = {retardo_real_ms:.1f} ms",
+                annotation_font_color=C["real"], annotation_position="bottom right",
+                row=3, col=1,
+            )
+
+        fig.update_layout(**PLOTLY_LAYOUT, height=620)
+        fig.update_xaxes(title_text="Tiempo (ms)", row=1, col=1, **AXIS_STYLE)
+        fig.update_yaxes(title_text="Amplitud", row=1, col=1, **AXIS_STYLE)
+        fig.update_xaxes(title_text="Tiempo (ms)", row=2, col=1, **AXIS_STYLE)
+        fig.update_yaxes(title_text="Amplitud", row=2, col=1, **AXIS_STYLE)
+        fig.update_xaxes(title_text="Lag τ (ms)", row=3, col=1, **AXIS_STYLE)
+        fig.update_yaxes(title_text="R(τ)", row=3, col=1, **AXIS_STYLE)
+        st.plotly_chart(fig, width="stretch", key="chart_xcorr")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Pico de correlación", f"{nivel_pico:.3f}")
+        c2.metric("τ del pico", f"{tau_pico_ms:.2f} ms")
+        if retardo_real_ms is not None:
+            c3.metric("τ real", f"{retardo_real_ms:.2f} ms",
+                      delta=f"{tau_pico_ms - retardo_real_ms:+.2f} ms")
+        else:
+            c3.metric("τ real", "—")
+
+        info_box(explicacion)
+
+# ─── Tab 2: Autocorrelación ───────────────────────────────────────────────────
+if MOSTRAR_TABS_AVANZADOS:
+    with tab2:
+        st.markdown("#### Autocorrelación de una señal")
+        st.caption(
+            "La autocorrelación R<sub>xx</sub>(τ) mide la similitud de una señal "
+            "consigo misma desplazada en τ. Revela periodicidades y propiedades "
+            "estadísticas — y es la base del diseño de buenos códigos de sincronismo.",
+            unsafe_allow_html=True,
+        )
+
+        casos_ac = [
+            "Senoidal pura",
+            "Ruido blanco",
+            "Pulso rectangular",
+            "Senoidal sumergida en ruido",
+            "Secuencia pseudoaleatoria (PRBS)",
+        ]
+        caso2 = st.selectbox("Tipo de señal", casos_ac, key="caso_acorr")
+
+        # Eje extendido para compensar el recorte de integración (ver Tab 1).
+        fs_int2 = 2000
+        T_disp2 = 1.0                          # ventana visible (s)
+        T_calc2 = 3.0                          # ventana de cómputo (s) — 3× la visible
+        t2 = np.arange(0, T_calc2, 1.0 / fs_int2)
+        N2 = len(t2)
+        N_disp2 = int(T_disp2 * fs_int2)
+        t2_disp = t2[:N_disp2]
+
+        es_caso_ruido2 = (caso2 == "Ruido blanco")
+        kind2 = "finite" if caso2 == "Pulso rectangular" else "stationary"
+
+        if caso2 == "Senoidal pura":
+            f0 = st.slider("Frecuencia (Hz)", 1, 30, 5, 1, key="f_seno_ac")
+            x = np.sin(2 * np.pi * f0 * t2)
+            explicacion2 = (
+                "La autocorrelación de una senoidal de frecuencia f₀ es "
+                "<b>otra cosenoidal</b> de la misma frecuencia: "
+                "R<sub>xx</sub>(τ) = ½·cos(2π·f₀·τ). "
+                "La señal mantiene memoria infinita de sí misma."
+            )
+
+        elif caso2 == "Ruido blanco":
+            rng = np.random.default_rng(7)
+            x = rng.normal(0, 1, size=N2)
+            explicacion2 = (
+                "El ruido blanco ideal tiene autocorrelación tipo <b>delta de Dirac</b> "
+                "en τ=0: muestras en instantes distintos son estadísticamente independientes. "
+                "Para una observación finita aparecen pequeñas fluctuaciones laterales."
+            )
+
+        elif caso2 == "Pulso rectangular":
+            ancho_ms = st.slider("Ancho del pulso (ms)", 10, 500, 100, 10, key="pulso_ac")
+            ancho_n = max(1, int(ancho_ms / 1000 * fs_int2))
+            x = np.zeros(N2)
+            # Centrar el pulso en la ventana visible (no en la extendida).
+            start = max(0, (N_disp2 - ancho_n) // 2)
+            x[start:start + ancho_n] = 1.0
+            explicacion2 = (
+                "La autocorrelación de un pulso rectangular de ancho T es un "
+                "<b>triángulo</b> de base 2T y vértice en τ=0. "
+                "El ancho de la autocorrelación es proporcional a la duración del pulso."
+            )
+
+        elif caso2 == "Senoidal sumergida en ruido":
+            f0 = st.slider("Frecuencia oculta f₀ (Hz)", 1, 30, 5, 1, key="f_ocul_ac")
+            amp = st.slider("Amplitud de la senoidal (rel. al ruido)", 0.05, 1.0, 0.3, 0.05, key="amp_ocul_ac")
+            rng = np.random.default_rng(11)
+            x = amp * np.sin(2 * np.pi * f0 * t2) + rng.normal(0, 1, size=N2)
+            explicacion2 = (
+                "Aunque en el dominio temporal la senoidal está oculta por el ruido, "
+                "la <b>autocorrelación promedia</b> el ruido (que tiende a cero fuera de τ=0) "
+                "y deja visible la componente periódica. "
+                "Es uno de los métodos más potentes para detectar señales en ruido."
+            )
+
+        else:  # PRBS
+            bits_per_sym = 32
+            nbits = N2 // bits_per_sym
+            rng = np.random.default_rng(3)
+            bits = rng.integers(0, 2, size=nbits)
+            x = np.repeat(np.where(bits == 1, 1.0, -1.0), bits_per_sym)
+            if len(x) < N2:
+                x = np.concatenate([x, np.zeros(N2 - len(x))])
+            else:
+                x = x[:N2]
+            explicacion2 = (
+                "Una secuencia pseudoaleatoria (PRBS / m-sequence) tiene autocorrelación con "
+                "un <b>pico estrecho en τ=0</b> y lóbulos laterales muy bajos. "
+                "Es la propiedad clave para diseñar códigos de sincronismo, CDMA y radar de "
+                "compresión de pulso."
+            )
+
+        # Aplicar ruido (excepto cuando la señal ya es ruido)
+        x_proc = x.copy()
+        if add_noise and not es_caso_ruido2:
+            x_proc = add_white_noise_to(x, snr_db, seed=99)
+
+        # Autocorrelación con compensación de bordes y recorte al rango visible.
+        rxx_full = autocorr_normalized(x_proc, kind=kind2)
+        lags2_full = np.arange(-(N2 - 1), N2)
+        tau_ms2_full = lags2_full * 1000.0 / fs_int2
+        mask2 = np.abs(lags2_full) <= N_disp2
+        tau_ms2 = tau_ms2_full[mask2]
+        rxx = rxx_full[mask2]
+
+        fig2 = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=(
+                f"Señal x(t): {caso2}" + ("  ·  con ruido sumado" if (add_noise and not es_caso_ruido2) else ""),
+                "Autocorrelación normalizada R<sub>xx</sub>(τ)",
+            ),
+            vertical_spacing=0.18,
+            row_heights=[0.4, 0.6],
+        )
+        fig2.add_trace(
+            go.Scatter(x=t2_disp * 1000, y=x_proc[:N_disp2],
+                       line=dict(color=C["signal"], width=1.2), showlegend=False),
+            row=1, col=1,
+        )
+        fig2.add_trace(
+            go.Scatter(x=tau_ms2, y=rxx, line=dict(color=C["filtered"], width=2), showlegend=False),
+            row=2, col=1,
+        )
+        fig2.add_vline(x=0, line_dash="dot", line_color=C["peak"], line_width=1.0, row=2, col=1)
+
+        fig2.update_layout(**PLOTLY_LAYOUT, height=520)
+        fig2.update_xaxes(title_text="Tiempo (ms)", row=1, col=1, **AXIS_STYLE)
+        fig2.update_yaxes(title_text="Amplitud", row=1, col=1, **AXIS_STYLE)
+        fig2.update_xaxes(title_text="Lag τ (ms)", row=2, col=1, **AXIS_STYLE)
+        fig2.update_yaxes(title_text="R(τ) / R(0)", row=2, col=1, **AXIS_STYLE)
+        st.plotly_chart(fig2, width="stretch", key="chart_acorr")
+
+        info_box(explicacion2)
+
+# ─── Tab nuevo: Correlación simple ────────────────────────────────────────────
+with tab_simple:
+    st.markdown("#### Correlación de dos señales (versión didáctica)")
     st.caption(
-        "Elegí un caso didáctico. La _señal A_ es la referencia y la _señal B_ es la "
-        "recibida (sobre la que se aplica el ruido si está activado)."
+        "Elegí dos señales con los menús desplegables y observá su correlación cruzada. "
+        "Activando _autocorrelación_ se inhabilita la Señal B y se correlaciona la "
+        "Señal A consigo misma."
     )
 
-    casos_xc = [
-        "Pulso retardado (radar / ranging)",
-        "Senoidales · misma frecuencia (con desfase)",
-        "Senoidal vs cuadrada (misma frecuencia)",
-        "Frecuencias distintas (caso ortogonal)",
-        "Señal vs ruido (caso negativo)",
-    ]
-    caso = st.selectbox("Caso", casos_xc, key="caso_xcorr")
+    TIPOS = ["Senoidal", "Tren de pulsos cuadrados", "Tren de pulsos triangulares"]
 
-    # Eje de tiempo: se calcula sobre una ventana extendida (T_calc) y se
-    # muestra solo la ventana visible (T_disp). El "ciclo extra de integración"
-    # evita que la correlación caiga artificialmente en los bordes del eje
-    # τ por falta de muestras solapadas.
-    fs_int = 2000                         # Hz internos para la simulación
-    T_disp = 1.0                          # ventana visible (s)
-    T_calc = 3.0                          # ventana de cómputo (s) — 3× la visible
-    t = np.arange(0, T_calc, 1.0 / fs_int)
+    auto_on = st.toggle(
+        "🔁 Autocorrelación (correlaciona la Señal A consigo misma; deshabilita Señal B)",
+        value=False, key="auto_simple",
+    )
+
+    cA, cB = st.columns(2)
+    with cA:
+        st.markdown("**Señal A**")
+        tipo_a = st.selectbox("Tipo", TIPOS, index=0, key="tipo_a_simple")
+        f_a = st.slider("Frecuencia (Hz)", 1, 30, 5, 1, key="f_a_simple")
+        amp_a = st.slider("Amplitud", 0.1, 2.0, 1.0, 0.1, key="amp_a_simple")
+    with cB:
+        st.markdown("**Señal B**" + (" — _deshabilitada_" if auto_on else ""))
+        tipo_b = st.selectbox("Tipo", TIPOS, index=1, key="tipo_b_simple", disabled=auto_on)
+        f_b = st.slider("Frecuencia (Hz)", 1, 30, 5, 1, key="f_b_simple", disabled=auto_on)
+        amp_b = st.slider("Amplitud", 0.1, 2.0, 1.0, 0.1, key="amp_b_simple", disabled=auto_on)
+
+    # ─── Generación de las señales ─────────────────────────────────────────────
+    # Se computa sobre una ventana 3× más larga que la visible (T_calc = 3·T_disp).
+    # Ese "ciclo extra de integración" hace que en el rango mostrado el solape
+    # entre las dos señales sea casi total, evitando la caída triangular que
+    # aparece cuando la integral se evalúa cerca de los extremos.
+    fs = 2000                                  # frecuencia de muestreo (Hz)
+    T_disp = 1.0                               # ventana visible (s)
+    T_calc = 3.0                               # ventana de cómputo (s)
+    t = np.arange(0, T_calc, 1.0 / fs)
     N = len(t)
-    N_disp = int(T_disp * fs_int)         # muestras visibles
-    t_disp = t[:N_disp]                   # eje visible para señales
+    N_disp = int(T_disp * fs)
+    t_vis = t[:N_disp]                         # eje visible
 
-    retardo_real_ms = None                # τ verdadero, si aplica
-    es_caso_ruido = (caso == "Señal vs ruido (caso negativo)")
-    # Tipo de señal para elegir el estimador (insesgado para estacionarias,
-    # sesgado para señales de energía finita y soporte localizado).
-    kind = "finite" if caso == "Pulso retardado (radar / ranging)" else "stationary"
+    def generar_senal(tipo, freq, amp, t):
+        """Genera una de las tres señales pedidas con frecuencia y amplitud dadas."""
+        if tipo == "Senoidal":
+            return amp * np.sin(2 * np.pi * freq * t)
+        if tipo == "Tren de pulsos cuadrados":
+            return amp * np.sign(np.sin(2 * np.pi * freq * t))
+        # Tren de pulsos triangulares: onda triangular simétrica entre -amp y +amp.
+        # fase ∈ [0,1) recorre un período; el valor sube de -1 a 1 y vuelve a -1.
+        # Se desplaza un cuarto de período para que cruce por cero en t=0 (igual
+        # que sin(2π·f·t)).
+        fase = (freq * t + 0.25) % 1.0
+        return amp * (1.0 - 4.0 * np.abs(fase - 0.5))
 
-    if caso == "Pulso retardado (radar / ranging)":
-        c1, c2 = st.columns(2)
-        delay_ms = c1.slider("Retardo del eco τ (ms)", 0, 800, 250, 10, key="delay_radar")
-        ancho_ms = c2.slider("Ancho del pulso (ms)", 5, 200, 40, 5, key="ancho_radar")
-        ancho_n = max(1, int(ancho_ms / 1000 * fs_int))
-        delay_n = int(delay_ms / 1000 * fs_int)
-
-        a = np.zeros(N)
-        a[0:ancho_n] = 1.0
-        b = np.zeros(N)
-        end_b = min(N, delay_n + ancho_n)
-        if delay_n < N:
-            b[delay_n:end_b] = 1.0
-
-        nombre_a, nombre_b = "Pulso emitido", "Eco recibido"
-        retardo_real_ms = float(delay_ms)
-        explicacion = (
-            "La <b>correlación cruzada</b> entre el pulso emitido y el eco recibido "
-            "presenta un pico en τ igual al retardo del eco. "
-            "Es la base del radar y del LIDAR: medir el tiempo del pico permite "
-            "calcular la distancia al blanco."
-        )
-
-    elif caso == "Senoidales · misma frecuencia (con desfase)":
-        c1, c2 = st.columns(2)
-        f0 = c1.slider("Frecuencia f₀ (Hz)", 1, 30, 5, 1, key="f_seno_xc")
-        fase = c2.slider("Desfase φ (°)", -180, 180, 60, 5, key="fase_seno_xc")
-        a = np.sin(2 * np.pi * f0 * t)
-        b = np.sin(2 * np.pi * f0 * t + np.deg2rad(fase))
-        nombre_a = "sin(2π·f₀·t)"
-        nombre_b = f"sin(2π·f₀·t + {fase}°)"
-        # τ que maximiza la correlación: B(t) = A(t + τ_real) ⇒ τ_real = -φ/(2π·f₀)
-        retardo_real_ms = -np.deg2rad(fase) / (2 * np.pi * f0) * 1000.0
-        explicacion = (
-            "La correlación de dos senoidales de igual frecuencia es <b>cosenoidal</b> en τ "
-            "y alcanza el máximo en el desfase temporal entre ambas. "
-            "Permite estimar el desfase de un canal coherente."
-        )
-
-    elif caso == "Senoidal vs cuadrada (misma frecuencia)":
-        f0 = st.slider("Frecuencia f₀ (Hz)", 1, 30, 5, 1, key="f_sq_xc")
-        a = np.sin(2 * np.pi * f0 * t)
-        b = np.sign(np.sin(2 * np.pi * f0 * t))
-        nombre_a = "sin(2π·f₀·t)"
-        nombre_b = "sgn(sin(2π·f₀·t))"
-        retardo_real_ms = 0.0
-        explicacion = (
-            "Aunque las formas son distintas, ambas comparten la <b>fundamental</b>. "
-            "La correlación es alta y máxima en τ=0 — la cuadrada se descompone en "
-            "armónicos impares y solo la fundamental aporta al producto interno con la senoidal."
-        )
-
-    elif caso == "Frecuencias distintas (caso ortogonal)":
-        c1, c2 = st.columns(2)
-        f1 = c1.slider("Frecuencia A (Hz)", 1, 30, 5, 1, key="f1_orto_xc")
-        f2 = c2.slider("Frecuencia B (Hz)", 1, 30, 8, 1, key="f2_orto_xc")
-        a = np.sin(2 * np.pi * f1 * t)
-        b = np.sin(2 * np.pi * f2 * t)
-        nombre_a = f"sin(2π·{f1}·t)"
-        nombre_b = f"sin(2π·{f2}·t)"
-        explicacion = (
-            "Sobre un intervalo entero de períodos comunes, las senoidales de "
-            "<b>frecuencias distintas</b> son ortogonales: la correlación oscila alrededor de "
-            "cero y no presenta un pico claro. Es el principio de la modulación FDM/OFDM."
-        )
-
-    else:  # Señal vs ruido
-        f0 = st.slider("Frecuencia f₀ (Hz)", 1, 30, 5, 1, key="f_ruido_xc")
-        a = np.sin(2 * np.pi * f0 * t)
-        rng = np.random.default_rng(7)
-        b = rng.normal(0, 1, size=N)
-        nombre_a = "sin(2π·f₀·t)"
-        nombre_b = "ruido blanco"
-        explicacion = (
-            "El ruido blanco es <b>estadísticamente independiente</b> de cualquier señal "
-            "determinista. La correlación cruzada tiende a cero (con fluctuaciones por la "
-            "longitud finita de la observación). Por eso la correlación se usa como filtro "
-            "adaptado contra el ruido."
-        )
-
-    # Ruido en la señal recibida (B). En "señal vs ruido" no se vuelve a sumar.
-    b_clean = b.copy()
-    if add_noise and not es_caso_ruido:
-        b = add_white_noise_to(b, snr_db, seed=13)
-
-    # Correlación cruzada con compensación del recorte de integración.
-    # Se computa sobre la ventana extendida (3× la visible) y se muestra
-    # solo el rango |τ| ≤ T_disp, donde el solape sigue siendo amplio.
-    r_full = cross_corr_normalized(b, a, kind=kind)
-    lags_full = np.arange(-(N - 1), N)
-    tau_full_ms = lags_full * 1000.0 / fs_int
-    mask = np.abs(lags_full) <= N_disp
-    tau_ms = tau_full_ms[mask]
-    r_xc = r_full[mask]
-
-    # Argmax "inteligente" para señales periódicas: la correlación insesgada
-    # equilibra la altura de los picos secundarios, por lo que un argmax global
-    # puede caer en cualquiera de ellos. Si conocemos τ esperado, buscamos el
-    # pico principal en una ventana acotada alrededor de ese valor.
-    if kind == "stationary" and retardo_real_ms is not None:
-        i_target = int(np.argmin(np.abs(tau_ms - retardo_real_ms)))
-        half_w = max(20, len(tau_ms) // 30)
-        lo, hi = max(0, i_target - half_w), min(len(tau_ms), i_target + half_w + 1)
-        i_max = lo + int(np.argmax(r_xc[lo:hi]))
+    señal_a = generar_senal(tipo_a, f_a, amp_a, t)
+    if auto_on:
+        # Autocorrelación: la "segunda señal" es la misma A.
+        señal_b_limpia = señal_a.copy()
+        nombre_b = f"= Señal A ({tipo_a})"
     else:
-        i_max = int(np.argmax(r_xc))
-    tau_pico_ms = float(tau_ms[i_max])
-    nivel_pico = float(r_xc[i_max])
+        señal_b_limpia = generar_senal(tipo_b, f_b, amp_b, t)
+        nombre_b = f"{tipo_b}  ·  f={f_b} Hz  ·  A={amp_b}"
 
-    # ─── Gráfico ───
-    fig = make_subplots(
+    # Sumar ruido a la señal recibida (B). La señal A queda siempre limpia.
+    if add_noise:
+        señal_b = add_white_noise_to(señal_b_limpia, snr_db, seed=21)
+    else:
+        señal_b = señal_b_limpia.copy()
+
+    # ─── Cálculo de la correlación (paso a paso) ───────────────────────────────
+    # 1) np.correlate calcula la suma  R(τ) = Σ_n  b(n) · a(n+τ)
+    #    para todos los desplazamientos posibles ("full"): τ ∈ [-(N-1), N-1].
+    correl = np.correlate(señal_b, señal_a, mode="full")
+
+    # 2) En cada lag τ hay distinta cantidad de muestras solapadas. En los
+    #    extremos del eje τ son pocas y la correlación cae artificialmente.
+    #    Dividimos por el número de muestras solapadas (estimador insesgado).
+    n_solape = _overlap_count(N, N)
+    correl = correl / n_solape
+
+    # 3) Normalizamos por las potencias medias para obtener una escala
+    #    comparable (≈ 1 en el pico cuando ambas señales son iguales).
+    norma = np.sqrt(np.mean(señal_a ** 2) * np.mean(señal_b ** 2)) + 1e-12
+    correl = correl / norma
+
+    # 4) Eje de lags en milisegundos y recorte a la zona donde el solape
+    #    sigue siendo amplio (|τ| ≤ T_disp).
+    lags = np.arange(-(N - 1), N)
+    tau_ms = lags * 1000.0 / fs
+    mascara = np.abs(lags) <= N_disp
+    tau_vis_ms = tau_ms[mascara]
+    correl_vis = correl[mascara]
+
+    # Pico de la correlación (en el rango visible).
+    i_pico = int(np.argmax(correl_vis))
+    tau_pico = float(tau_vis_ms[i_pico])
+    nivel_pico = float(correl_vis[i_pico])
+
+    # ─── Gráfico ───────────────────────────────────────────────────────────────
+    titulo_a = f"Señal A · {tipo_a}  ·  f={f_a} Hz  ·  A={amp_a}"
+    titulo_b = f"Señal B · {nombre_b}" + (
+        f"  ·  con ruido (SNR={snr_db} dB)" if add_noise else "  ·  sin ruido"
+    )
+    titulo_corr = (
+        "Autocorrelación R<sub>AA</sub>(τ)" if auto_on else "Correlación cruzada R<sub>BA</sub>(τ)"
+    )
+
+    fig_s = make_subplots(
         rows=3, cols=1,
-        subplot_titles=(
-            f"Señal A (referencia): {nombre_a}",
-            f"Señal B (recibida): {nombre_b}" + ("  ·  con ruido" if (add_noise and not es_caso_ruido) else "  ·  sin ruido"),
-            "Correlación cruzada R<sub>BA</sub>(τ)",
-        ),
+        subplot_titles=(titulo_a, titulo_b, titulo_corr),
         vertical_spacing=0.11,
     )
-    fig.add_trace(
-        go.Scatter(x=t_disp * 1000, y=a[:N_disp],
+    fig_s.add_trace(
+        go.Scatter(x=t_vis * 1000, y=señal_a[:N_disp],
                    line=dict(color=C["signal"], width=2), showlegend=False),
         row=1, col=1,
     )
-    fig.add_trace(
-        go.Scatter(x=t_disp * 1000, y=b[:N_disp],
+    fig_s.add_trace(
+        go.Scatter(x=t_vis * 1000, y=señal_b[:N_disp],
                    line=dict(color=C["received"], width=1.5), showlegend=False),
         row=2, col=1,
     )
-    fig.add_trace(
-        go.Scatter(x=tau_ms, y=r_xc, line=dict(color=C["filtered"], width=2), showlegend=False),
+    fig_s.add_trace(
+        go.Scatter(x=tau_vis_ms, y=correl_vis,
+                   line=dict(color=C["filtered"], width=2), showlegend=False),
         row=3, col=1,
     )
-    fig.add_vline(
-        x=tau_pico_ms, line_dash="dash", line_color=C["peak"], line_width=1.5,
-        annotation_text=f"τ* = {tau_pico_ms:.1f} ms<br>R = {nivel_pico:.2f}",
+    fig_s.add_vline(
+        x=tau_pico, line_dash="dash", line_color=C["peak"], line_width=1.5,
+        annotation_text=f"τ* = {tau_pico:.1f} ms<br>R = {nivel_pico:.2f}",
         annotation_font_color=C["peak"], annotation_position="top right",
         row=3, col=1,
     )
-    if retardo_real_ms is not None:
-        fig.add_vline(
-            x=retardo_real_ms, line_dash="dot", line_color=C["real"], line_width=1.2,
-            annotation_text=f"τ real = {retardo_real_ms:.1f} ms",
-            annotation_font_color=C["real"], annotation_position="bottom right",
-            row=3, col=1,
-        )
 
-    fig.update_layout(**PLOTLY_LAYOUT, height=620)
-    fig.update_xaxes(title_text="Tiempo (ms)", row=1, col=1, **AXIS_STYLE)
-    fig.update_yaxes(title_text="Amplitud", row=1, col=1, **AXIS_STYLE)
-    fig.update_xaxes(title_text="Tiempo (ms)", row=2, col=1, **AXIS_STYLE)
-    fig.update_yaxes(title_text="Amplitud", row=2, col=1, **AXIS_STYLE)
-    fig.update_xaxes(title_text="Lag τ (ms)", row=3, col=1, **AXIS_STYLE)
-    fig.update_yaxes(title_text="R(τ)", row=3, col=1, **AXIS_STYLE)
-    st.plotly_chart(fig, width="stretch", key="chart_xcorr")
+    fig_s.update_layout(**PLOTLY_LAYOUT, height=620)
+    fig_s.update_xaxes(title_text="Tiempo (ms)", row=1, col=1, **AXIS_STYLE)
+    fig_s.update_yaxes(title_text="Amplitud", row=1, col=1, **AXIS_STYLE)
+    fig_s.update_xaxes(title_text="Tiempo (ms)", row=2, col=1, **AXIS_STYLE)
+    fig_s.update_yaxes(title_text="Amplitud", row=2, col=1, **AXIS_STYLE)
+    fig_s.update_xaxes(title_text="Lag τ (ms)", row=3, col=1, **AXIS_STYLE)
+    fig_s.update_yaxes(title_text="R(τ)", row=3, col=1, **AXIS_STYLE)
+    st.plotly_chart(fig_s, width="stretch", key="chart_simple")
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     c1.metric("Pico de correlación", f"{nivel_pico:.3f}")
-    c2.metric("τ del pico", f"{tau_pico_ms:.2f} ms")
-    if retardo_real_ms is not None:
-        c3.metric("τ real", f"{retardo_real_ms:.2f} ms",
-                  delta=f"{tau_pico_ms - retardo_real_ms:+.2f} ms")
-    else:
-        c3.metric("τ real", "—")
+    c2.metric("τ del pico", f"{tau_pico:.2f} ms")
 
-    info_box(explicacion)
-
-# ─── Tab 2: Autocorrelación ───────────────────────────────────────────────────
-with tab2:
-    st.markdown("#### Autocorrelación de una señal")
-    st.caption(
-        "La autocorrelación R<sub>xx</sub>(τ) mide la similitud de una señal "
-        "consigo misma desplazada en τ. Revela periodicidades y propiedades "
-        "estadísticas — y es la base del diseño de buenos códigos de sincronismo.",
-        unsafe_allow_html=True,
+    info_box(
+        "El cálculo se hace en tres pasos: <b>(1)</b> <code>np.correlate</code> recorre "
+        "todos los desplazamientos posibles entre las dos señales; <b>(2)</b> se divide "
+        "por la cantidad de muestras realmente solapadas en cada τ para que los extremos "
+        "no se vean atenuados por la ventana finita; <b>(3)</b> se normaliza por las "
+        "potencias medias para obtener una escala comparable. La señal se computa sobre "
+        "una ventana 3× la visible — los _ciclos extra de integración_ aseguran que en "
+        "todo el rango mostrado el solape sea casi total."
     )
-
-    casos_ac = [
-        "Senoidal pura",
-        "Ruido blanco",
-        "Pulso rectangular",
-        "Senoidal sumergida en ruido",
-        "Secuencia pseudoaleatoria (PRBS)",
-    ]
-    caso2 = st.selectbox("Tipo de señal", casos_ac, key="caso_acorr")
-
-    # Eje extendido para compensar el recorte de integración (ver Tab 1).
-    fs_int2 = 2000
-    T_disp2 = 1.0                          # ventana visible (s)
-    T_calc2 = 3.0                          # ventana de cómputo (s) — 3× la visible
-    t2 = np.arange(0, T_calc2, 1.0 / fs_int2)
-    N2 = len(t2)
-    N_disp2 = int(T_disp2 * fs_int2)
-    t2_disp = t2[:N_disp2]
-
-    es_caso_ruido2 = (caso2 == "Ruido blanco")
-    kind2 = "finite" if caso2 == "Pulso rectangular" else "stationary"
-
-    if caso2 == "Senoidal pura":
-        f0 = st.slider("Frecuencia (Hz)", 1, 30, 5, 1, key="f_seno_ac")
-        x = np.sin(2 * np.pi * f0 * t2)
-        explicacion2 = (
-            "La autocorrelación de una senoidal de frecuencia f₀ es "
-            "<b>otra cosenoidal</b> de la misma frecuencia: "
-            "R<sub>xx</sub>(τ) = ½·cos(2π·f₀·τ). "
-            "La señal mantiene memoria infinita de sí misma."
-        )
-
-    elif caso2 == "Ruido blanco":
-        rng = np.random.default_rng(7)
-        x = rng.normal(0, 1, size=N2)
-        explicacion2 = (
-            "El ruido blanco ideal tiene autocorrelación tipo <b>delta de Dirac</b> "
-            "en τ=0: muestras en instantes distintos son estadísticamente independientes. "
-            "Para una observación finita aparecen pequeñas fluctuaciones laterales."
-        )
-
-    elif caso2 == "Pulso rectangular":
-        ancho_ms = st.slider("Ancho del pulso (ms)", 10, 500, 100, 10, key="pulso_ac")
-        ancho_n = max(1, int(ancho_ms / 1000 * fs_int2))
-        x = np.zeros(N2)
-        # Centrar el pulso en la ventana visible (no en la extendida).
-        start = max(0, (N_disp2 - ancho_n) // 2)
-        x[start:start + ancho_n] = 1.0
-        explicacion2 = (
-            "La autocorrelación de un pulso rectangular de ancho T es un "
-            "<b>triángulo</b> de base 2T y vértice en τ=0. "
-            "El ancho de la autocorrelación es proporcional a la duración del pulso."
-        )
-
-    elif caso2 == "Senoidal sumergida en ruido":
-        f0 = st.slider("Frecuencia oculta f₀ (Hz)", 1, 30, 5, 1, key="f_ocul_ac")
-        amp = st.slider("Amplitud de la senoidal (rel. al ruido)", 0.05, 1.0, 0.3, 0.05, key="amp_ocul_ac")
-        rng = np.random.default_rng(11)
-        x = amp * np.sin(2 * np.pi * f0 * t2) + rng.normal(0, 1, size=N2)
-        explicacion2 = (
-            "Aunque en el dominio temporal la senoidal está oculta por el ruido, "
-            "la <b>autocorrelación promedia</b> el ruido (que tiende a cero fuera de τ=0) "
-            "y deja visible la componente periódica. "
-            "Es uno de los métodos más potentes para detectar señales en ruido."
-        )
-
-    else:  # PRBS
-        bits_per_sym = 32
-        nbits = N2 // bits_per_sym
-        rng = np.random.default_rng(3)
-        bits = rng.integers(0, 2, size=nbits)
-        x = np.repeat(np.where(bits == 1, 1.0, -1.0), bits_per_sym)
-        if len(x) < N2:
-            x = np.concatenate([x, np.zeros(N2 - len(x))])
-        else:
-            x = x[:N2]
-        explicacion2 = (
-            "Una secuencia pseudoaleatoria (PRBS / m-sequence) tiene autocorrelación con "
-            "un <b>pico estrecho en τ=0</b> y lóbulos laterales muy bajos. "
-            "Es la propiedad clave para diseñar códigos de sincronismo, CDMA y radar de "
-            "compresión de pulso."
-        )
-
-    # Aplicar ruido (excepto cuando la señal ya es ruido)
-    x_proc = x.copy()
-    if add_noise and not es_caso_ruido2:
-        x_proc = add_white_noise_to(x, snr_db, seed=99)
-
-    # Autocorrelación con compensación de bordes y recorte al rango visible.
-    rxx_full = autocorr_normalized(x_proc, kind=kind2)
-    lags2_full = np.arange(-(N2 - 1), N2)
-    tau_ms2_full = lags2_full * 1000.0 / fs_int2
-    mask2 = np.abs(lags2_full) <= N_disp2
-    tau_ms2 = tau_ms2_full[mask2]
-    rxx = rxx_full[mask2]
-
-    fig2 = make_subplots(
-        rows=2, cols=1,
-        subplot_titles=(
-            f"Señal x(t): {caso2}" + ("  ·  con ruido sumado" if (add_noise and not es_caso_ruido2) else ""),
-            "Autocorrelación normalizada R<sub>xx</sub>(τ)",
-        ),
-        vertical_spacing=0.18,
-        row_heights=[0.4, 0.6],
-    )
-    fig2.add_trace(
-        go.Scatter(x=t2_disp * 1000, y=x_proc[:N_disp2],
-                   line=dict(color=C["signal"], width=1.2), showlegend=False),
-        row=1, col=1,
-    )
-    fig2.add_trace(
-        go.Scatter(x=tau_ms2, y=rxx, line=dict(color=C["filtered"], width=2), showlegend=False),
-        row=2, col=1,
-    )
-    fig2.add_vline(x=0, line_dash="dot", line_color=C["peak"], line_width=1.0, row=2, col=1)
-
-    fig2.update_layout(**PLOTLY_LAYOUT, height=520)
-    fig2.update_xaxes(title_text="Tiempo (ms)", row=1, col=1, **AXIS_STYLE)
-    fig2.update_yaxes(title_text="Amplitud", row=1, col=1, **AXIS_STYLE)
-    fig2.update_xaxes(title_text="Lag τ (ms)", row=2, col=1, **AXIS_STYLE)
-    fig2.update_yaxes(title_text="R(τ) / R(0)", row=2, col=1, **AXIS_STYLE)
-    st.plotly_chart(fig2, width="stretch", key="chart_acorr")
-
-    info_box(explicacion2)
 
 # ─── Tab 3: Sincronismo de trama ──────────────────────────────────────────────
 with tab3:
