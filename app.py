@@ -194,7 +194,7 @@ if MOSTRAR_TABS_AVANZADOS:
     ])
 else:
     tab_simple, tab3 = st.tabs([
-        "🧪 Correlación simple",
+        "🧪 Correlación",
         "🎯 Sincronismo de trama",
     ])
 
@@ -683,15 +683,15 @@ with tab_simple:
     c1.metric("Pico de correlación", f"{nivel_pico:.3f}")
     c2.metric("τ del pico", f"{tau_pico:.2f} ms")
 
-    info_box(
-        "El cálculo se hace en tres pasos: <b>(1)</b> <code>np.correlate</code> recorre "
-        "todos los desplazamientos posibles entre las dos señales; <b>(2)</b> se divide "
-        "por la cantidad de muestras realmente solapadas en cada τ para que los extremos "
-        "no se vean atenuados por la ventana finita; <b>(3)</b> se normaliza por las "
-        "potencias medias para obtener una escala comparable. La señal se computa sobre "
-        "una ventana 3× la visible — los _ciclos extra de integración_ aseguran que en "
-        "todo el rango mostrado el solape sea casi total."
-    )
+#    info_box(
+#        "El cálculo se hace en tres pasos: <b>(1)</b> <code>np.correlate</code> recorre "
+#        "todos los desplazamientos posibles entre las dos señales; <b>(2)</b> se divide "
+#        "por la cantidad de muestras realmente solapadas en cada τ para que los extremos "
+#        "no se vean atenuados por la ventana finita; <b>(3)</b> se normaliza por las "
+#        "potencias medias para obtener una escala comparable. La señal se computa sobre "
+#        "una ventana 3× la visible — los _ciclos extra de integración_ aseguran que en "
+#        "todo el rango mostrado el solape sea casi total."
+#    )
 
 # ─── Tab 3: Sincronismo de trama ──────────────────────────────────────────────
 with tab3:
