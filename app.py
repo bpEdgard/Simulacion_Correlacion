@@ -545,9 +545,9 @@ with tab_simple:
     st.caption(
         "Elegí dos señales con los menús desplegables y observá su correlación cruzada. "
         "Activando _autocorrelación_ se inhabilita la Señal B y se correlaciona la "
-        "Señal A consigo misma. La correlación se calcula **sin normalizar** (solo media "
-        "en el solape) sobre un tramo de tiempo **más largo** que el gráfico, para reducir "
-        "el sesgo de bordes en los retardos mostrados."
+        "Señal A consigo misma. La correlación es **sin normalizar** (media en el solape); "
+        "las señales se calculan **3×** más tiempo del que se muestra (coste similar al original) "
+        "y la división por solape en cada τ corrige la caída en los extremos del eje de retardos."
     )
 
     TIPOS = [
@@ -575,15 +575,12 @@ with tab_simple:
         amp_b = st.slider("Amplitud", 0.1, 2.0, 1.0, 0.1, key="amp_b_simple", disabled=auto_on)
 
     # ─── Generación de las señales ─────────────────────────────────────────────
-    # Solo se grafica T_disp en los paneles de señales; la correlación usa t en [0, T_calc)
-    # con T_calc >> T_disp para integrar muchos períodos de la frecuencia más baja activa
-    # y que, en el rango de τ mostrado, el solape sea amplio (menos error de extremos).
+    # Solo se grafica T_disp en A/B; la correlación usa t en [0, T_calc) con T_calc = 3·T_disp
+    # (coste similar al original). La corrección de bordes en τ viene sobre todo de dividir
+    # por el número de muestras solapadas en cada lag (cross_corr_overlap_mean).
     fs = 2000                                  # frecuencia de muestreo (Hz)
     T_disp = 1.0                               # ventana visible (s)
-    f_min_hz = max(min(float(f_a), float(f_b) if not auto_on else float(f_a)), 0.5)
-    # Al menos ~48 períodos de la fundamental más lenta; nunca menos que 3× lo visible;
-    # tope 12 s para no crecer demasiado en RAM/tiempo.
-    T_calc = min(12.0, max(3.0 * T_disp, 48.0 / f_min_hz))
+    T_calc = 3.0 * T_disp                      # ventana de cómputo (s) — 3× la visible
     t = np.arange(0, T_calc, 1.0 / fs)
     N = len(t)
     N_disp = int(T_disp * fs)
@@ -688,9 +685,8 @@ with tab_simple:
     c2.metric("τ del pico", f"{tau_pico:.2f} ms")
 
 #    info_box(
-#        "Correlación: <code>np.correlate</code> y división por muestras solapadas (media de b·a), "
-#        "sin RMS. La ventana temporal de cómputo es más larga que la mostrada (muchos períodos "
-#        "de la frecuencia más baja) para que en el τ visible el solape sea amplio."
+#        "Correlación: media de b·a por solape (sin RMS). Cómputo en ventana 3× la visible; "
+#        "la división por n_solape(τ) corrige la caída triangular en los extremos del eje de τ."
 #    )
 
 # ─── Tab 3: Sincronismo de trama ──────────────────────────────────────────────
