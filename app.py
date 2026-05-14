@@ -72,7 +72,6 @@ def add_white_noise_to(signal, snr_db, seed):
     p_noise = p_signal / (10 ** (snr_db / 10))
     return signal + rng.normal(0.0, np.sqrt(p_noise), size=signal.shape)
 
-
 def _overlap_count(N, M):
     """Número de muestras solapadas en cada lag de np.correlate(a, b, 'full')
     con len(a)=N, len(b)=M. En los extremos del eje de lag el solapamiento
@@ -87,6 +86,12 @@ def _overlap_count(N, M):
         np.full(L, N, dtype=float),
         (L - k).astype(float),
     ])
+
+def cross_corr_overlap_mean(rx, ref):
+    """Media de rx·ref en cada lag: np.correlate(full) / n_solape. Sin normalizar por RMS."""
+    full = np.correlate(rx, ref, mode="full").astype(float)
+    n_ov = np.maximum(_overlap_count(len(rx), len(ref)), 1.0)
+    return full / n_ov
 
 
 def cross_corr_normalized(rx, ref, kind="stationary"):
@@ -114,7 +119,6 @@ def cross_corr_normalized(rx, ref, kind="stationary"):
     norm = float(np.sum(ref ** 2)) + 1e-12
     return full / norm
 
-
 def autocorr_normalized(x, kind="stationary"):
     """Autocorrelación con compensación de bordes (ver cross_corr_normalized).
     Pico en lag 0 = 1 en ambas variantes.
@@ -126,7 +130,6 @@ def autocorr_normalized(x, kind="stationary"):
         return unbiased / (np.mean(x ** 2) + 1e-12)
     peak = float(np.max(np.abs(full))) + 1e-12
     return full / peak
-
 
 def info_box(html, font_color=None):
     color = font_color or C["zone_label"]
@@ -542,7 +545,9 @@ with tab_simple:
     st.caption(
         "Elegí dos señales con los menús desplegables y observá su correlación cruzada. "
         "Activando _autocorrelación_ se inhabilita la Señal B y se correlaciona la "
-        "Señal A consigo misma."
+        "Señal A consigo misma. La correlación se calcula **sin normalizar** (solo media "
+        "en el solape) sobre un tramo de tiempo **más largo** que el gráfico, para reducir "
+        "el sesgo de bordes en los retardos mostrados."
     )
 
     TIPOS = [
@@ -570,13 +575,15 @@ with tab_simple:
         amp_b = st.slider("Amplitud", 0.1, 2.0, 1.0, 0.1, key="amp_b_simple", disabled=auto_on)
 
     # ─── Generación de las señales ─────────────────────────────────────────────
-    # Se computa sobre una ventana 3× más larga que la visible (T_calc = 3·T_disp).
-    # Ese "ciclo extra de integración" hace que en el rango mostrado el solape
-    # entre las dos señales sea casi total, evitando la caída triangular que
-    # aparece cuando la integral se evalúa cerca de los extremos.
+    # Solo se grafica T_disp en los paneles de señales; la correlación usa t en [0, T_calc)
+    # con T_calc >> T_disp para integrar muchos períodos de la frecuencia más baja activa
+    # y que, en el rango de τ mostrado, el solape sea amplio (menos error de extremos).
     fs = 2000                                  # frecuencia de muestreo (Hz)
     T_disp = 1.0                               # ventana visible (s)
-    T_calc = 3.0                               # ventana de cómputo (s)
+    f_min_hz = max(min(float(f_a), float(f_b) if not auto_on else float(f_a)), 0.5)
+    # Al menos ~48 períodos de la fundamental más lenta; nunca menos que 3× lo visible;
+    # tope 12 s para no crecer demasiado en RAM/tiempo.
+    T_calc = min(12.0, max(3.0 * T_disp, 48.0 / f_min_hz))
     t = np.arange(0, T_calc, 1.0 / fs)
     N = len(t)
     N_disp = int(T_disp * fs)
@@ -614,24 +621,12 @@ with tab_simple:
     else:
         señal_b = señal_b_limpia.copy()
 
-    # ─── Cálculo de la correlación (paso a paso) ───────────────────────────────
-    # 1) np.correlate calcula la suma  R(τ) = Σ_n  b(n) · a(n+τ)
-    #    para todos los desplazamientos posibles ("full"): τ ∈ [-(N-1), N-1].
-    correl = np.correlate(señal_b, señal_a, mode="full")
+    # ─── Cálculo de la correlación (solo esta pestaña: dimensional por solape) ──
+    # np.correlate(full) y en cada τ se divide solo por el número de muestras
+    # solapadas (media de b·a). No se divide por RMS → el eje y es acorde a las amplitudes.
+    correl = cross_corr_overlap_mean(señal_b, señal_a)
 
-    # 2) En cada lag τ hay distinta cantidad de muestras solapadas. En los
-    #    extremos del eje τ son pocas y la correlación cae artificialmente.
-    #    Dividimos por el número de muestras solapadas (estimador insesgado).
-    n_solape = _overlap_count(N, N)
-    correl = correl / n_solape
-
-    # 3) Normalizamos por las potencias medias para obtener una escala
-    #    comparable (≈ 1 en el pico cuando ambas señales son iguales).
-    norma = np.sqrt(np.mean(señal_a ** 2) * np.mean(señal_b ** 2)) + 1e-12
-    correl = correl / norma
-
-    # 4) Eje de lags en milisegundos y recorte a la zona donde el solape
-    #    sigue siendo amplio. Solo se muestra el semieje positivo (0 ≤ τ ≤ T_disp).
+    # Eje de lags en ms; recorte al semieje positivo 0 ≤ τ ≤ T_disp (amplio solape).
     lags = np.arange(-(N - 1), N)
     tau_ms = lags * 1000.0 / fs
     mascara = (lags >= 0) & (lags <= N_disp)
@@ -685,7 +680,7 @@ with tab_simple:
     fig_s.update_xaxes(title_text="Tiempo (ms)", row=2, col=1, **AXIS_STYLE)
     fig_s.update_yaxes(title_text="Amplitud", row=2, col=1, **AXIS_STYLE)
     fig_s.update_xaxes(title_text="Lag τ (ms)", row=3, col=1, **AXIS_STYLE)
-    fig_s.update_yaxes(title_text="R(τ)", row=3, col=1, **AXIS_STYLE)
+    fig_s.update_yaxes(title_text="Media b·a", row=3, col=1, **AXIS_STYLE)
     st.plotly_chart(fig_s, width="stretch", key="chart_simple")
 
     c1, c2 = st.columns(2)
@@ -693,13 +688,9 @@ with tab_simple:
     c2.metric("τ del pico", f"{tau_pico:.2f} ms")
 
 #    info_box(
-#        "El cálculo se hace en tres pasos: <b>(1)</b> <code>np.correlate</code> recorre "
-#        "todos los desplazamientos posibles entre las dos señales; <b>(2)</b> se divide "
-#        "por la cantidad de muestras realmente solapadas en cada τ para que los extremos "
-#        "no se vean atenuados por la ventana finita; <b>(3)</b> se normaliza por las "
-#        "potencias medias para obtener una escala comparable. La señal se computa sobre "
-#        "una ventana 3× la visible — los _ciclos extra de integración_ aseguran que en "
-#        "todo el rango mostrado el solape sea casi total."
+#        "Correlación: <code>np.correlate</code> y división por muestras solapadas (media de b·a), "
+#        "sin RMS. La ventana temporal de cómputo es más larga que la mostrada (muchos períodos "
+#        "de la frecuencia más baja) para que en el τ visible el solape sea amplio."
 #    )
 
 # ─── Tab 3: Sincronismo de trama ──────────────────────────────────────────────
